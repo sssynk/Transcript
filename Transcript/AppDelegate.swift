@@ -129,6 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text = Self.deStutter(text)
         }
 
+        let shouldDetectQuotations = UserDefaults.standard.object(forKey: "detectQuotations") as? Bool ?? false
+        if shouldDetectQuotations {
+            text = Self.detectLikelyQuotations(in: text)
+        }
+
         let styleRaw = UserDefaults.standard.string(forKey: "outputStyle") ?? "Formal"
         if let style = OutputStyle(rawValue: styleRaw) {
             text = Self.applyStyle(style, to: text)
@@ -139,6 +144,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static let allowedDuplicates: Set<String> = [
         "that", "had", "very", "really", "so", "bye"
+    ]
+
+    private static let speechVerbs: Set<String> = [
+        "say", "says", "said", "tell", "tells", "told", "ask", "asks", "asked",
+        "reply", "replies", "replied", "whisper", "whispers", "whispered",
+        "shout", "shouts", "shouted", "yell", "yells", "yelled",
+        "write", "writes", "wrote", "text", "texts", "texted",
+        "message", "messages", "messaged", "goes", "went"
+    ]
+
+    private static let beVerbs: Set<String> = ["am", "is", "are", "was", "were", "be", "been", "being"]
+    private static let quoteRecipients: Set<String> = ["me", "him", "her", "them", "us", "you"]
+    private static let indirectOpeners: Set<String> = ["that", "if", "whether"]
+    private static let discourseBoundaries: Set<String> = ["because", "since", "although", "though", "while"]
+    private static let conjunctionBoundaries: Set<String> = ["and", "but", "then"]
+    private static let likelySubjects: Set<String> = ["i", "you", "he", "she", "they", "we", "it"]
+    private static let interjections: Set<String> = [
+        "oh", "hey", "nah", "bro", "wow", "yo", "omg", "please", "no", "yes", "yeah", "yep", "nope", "wait"
+    ]
+    private static let imperativeStarters: Set<String> = [
+        "go", "stop", "look", "listen", "wait", "come", "leave", "tell", "give", "take", "hold", "watch", "read", "check"
+    ]
+    private static let conversationalPronouns: Set<String> = [
+        "i", "you", "me", "my", "mine", "your", "yours", "we", "us", "our", "ours"
     ]
 
     private static func deStutter(_ text: String) -> String {
@@ -154,6 +183,237 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return words.joined(separator: " ")
+    }
+
+    private static func detectLikelyQuotations(in text: String) -> String {
+        let compact = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !compact.isEmpty else { return text }
+
+        struct QuoteCandidate {
+            let introducerEnd: Int
+            let range: Range<Int>
+        }
+
+        var tokens = compact.split(separator: " ").map(String.init)
+        guard tokens.count > 2 else { return compact }
+
+        var candidates: [QuoteCandidate] = []
+        var i = 0
+
+        while i < tokens.count {
+            let introducerLength = speechIntroducerLength(in: tokens, at: i)
+            guard introducerLength > 0 else {
+                i += 1
+                continue
+            }
+
+            let introducerEnd = i + introducerLength - 1
+            let start = adjustedQuoteStart(in: tokens, after: introducerEnd + 1)
+            guard start < tokens.count else {
+                i = introducerEnd + 1
+                continue
+            }
+
+            if tokens[start].contains("\"") {
+                i = start + 1
+                continue
+            }
+
+            let firstWord = normalizedToken(tokens[start])
+            if indirectOpeners.contains(firstWord) {
+                i = start + 1
+                continue
+            }
+
+            let end = quoteEnd(in: tokens, start: start)
+            guard end > start else {
+                i = start + 1
+                continue
+            }
+
+            let range = start..<end
+            if quoteScore(in: tokens, range: range) >= 2 {
+                candidates.append(QuoteCandidate(introducerEnd: introducerEnd, range: range))
+                i = end
+            } else {
+                i = start + 1
+            }
+        }
+
+        guard !candidates.isEmpty else { return compact }
+
+        for candidate in candidates {
+            tokens[candidate.introducerEnd] = ensureIntroPunctuation(on: tokens[candidate.introducerEnd])
+
+            let start = candidate.range.lowerBound
+            let end = candidate.range.upperBound - 1
+            if !tokens[start].hasPrefix("\"") {
+                tokens[start] = "\"" + tokens[start]
+            }
+
+            let preferredEnding: Character = candidate.range.upperBound < tokens.count ? "," : "."
+            tokens[end] = ensureClosingQuote(on: tokens[end], preferredPunctuation: preferredEnding)
+        }
+
+        return tokens.joined(separator: " ")
+    }
+
+    private static func speechIntroducerLength(in tokens: [String], at index: Int) -> Int {
+        guard index < tokens.count else { return 0 }
+        let current = normalizedToken(tokens[index])
+        if speechVerbs.contains(current) {
+            return 1
+        }
+
+        if beVerbs.contains(current), index + 1 < tokens.count, normalizedToken(tokens[index + 1]) == "like" {
+            return 2
+        }
+
+        return 0
+    }
+
+    private static func adjustedQuoteStart(in tokens: [String], after index: Int) -> Int {
+        guard index < tokens.count else { return index }
+        var start = index
+        if normalizedToken(tokens[start]) == "to",
+           start + 1 < tokens.count,
+           quoteRecipients.contains(normalizedToken(tokens[start + 1])) {
+            start += 2
+        } else if quoteRecipients.contains(normalizedToken(tokens[start])) {
+            start += 1
+        }
+        return start
+    }
+
+    private static func quoteEnd(in tokens: [String], start: Int) -> Int {
+        let maxWindow = 18
+        let limit = min(tokens.count, start + maxWindow)
+        var idx = start
+
+        while idx < limit {
+            if idx > start {
+                if hasSentenceEnding(tokens[idx]) {
+                    return idx + 1
+                }
+
+                if speechIntroducerLength(in: tokens, at: idx) > 0 {
+                    return idx
+                }
+
+                let word = normalizedToken(tokens[idx])
+                if discourseBoundaries.contains(word) {
+                    return idx
+                }
+
+                if conjunctionBoundaries.contains(word), shouldBreakAtConjunction(in: tokens, index: idx) {
+                    return idx
+                }
+            }
+            idx += 1
+        }
+
+        return limit
+    }
+
+    private static func shouldBreakAtConjunction(in tokens: [String], index: Int) -> Bool {
+        guard index + 1 < tokens.count else { return false }
+        let next = normalizedToken(tokens[index + 1])
+        if likelySubjects.contains(next) {
+            return true
+        }
+
+        if speechIntroducerLength(in: tokens, at: index + 1) > 0 {
+            return true
+        }
+
+        if index + 2 < tokens.count,
+           likelySubjects.contains(next),
+           speechIntroducerLength(in: tokens, at: index + 2) > 0 {
+            return true
+        }
+
+        return false
+    }
+
+    private static func quoteScore(in tokens: [String], range: Range<Int>) -> Int {
+        let words = tokens[range]
+            .map { normalizedToken($0) }
+            .filter { !$0.isEmpty }
+
+        guard let first = words.first else { return Int.min }
+
+        var score = 0
+        if words.count <= 12 {
+            score += 2
+        } else if words.count <= 18 {
+            score += 1
+        } else {
+            score -= 2
+        }
+
+        if indirectOpeners.contains(first) {
+            score -= 4
+        }
+
+        if interjections.contains(first) || words.contains(where: interjections.contains) {
+            score += 1
+        }
+
+        if imperativeStarters.contains(first) {
+            score += 2
+        }
+
+        if words.contains(where: conversationalPronouns.contains) {
+            score += 1
+        }
+
+        if words.contains(where: discourseBoundaries.contains) {
+            score -= 1
+        }
+
+        return score
+    }
+
+    private static func normalizedToken(_ token: String) -> String {
+        token
+            .trimmingCharacters(in: CharacterSet.punctuationCharacters.union(CharacterSet(charactersIn: "\"'")))
+            .lowercased()
+    }
+
+    private static func hasSentenceEnding(_ token: String) -> Bool {
+        let trimmed = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        return trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?")
+    }
+
+    private static func hasTrailingMark(_ token: String, marks: Set<Character>) -> Bool {
+        let trimmed = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        guard let last = trimmed.last else { return false }
+        return marks.contains(last)
+    }
+
+    private static func ensureIntroPunctuation(on token: String) -> String {
+        let existing: Set<Character> = [",", ":", ";", ".", "!", "?"]
+        if hasTrailingMark(token, marks: existing) {
+            return token
+        }
+        return token + ","
+    }
+
+    private static func ensureClosingQuote(on token: String, preferredPunctuation: Character) -> String {
+        var core = token
+        if core.hasSuffix("\"") {
+            core.removeLast()
+        }
+
+        let endings: Set<Character> = [".", "!", "?", ","]
+        if !hasTrailingMark(core, marks: endings) {
+            core.append(preferredPunctuation)
+        }
+
+        core.append("\"")
+        return core
     }
 
     private static func applyStyle(_ style: OutputStyle, to text: String) -> String {

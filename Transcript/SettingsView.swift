@@ -107,6 +107,7 @@ private struct OutputTab: View {
     @Bindable var store: ReplacementStore
 
     @AppStorage("removeStuttering") private var removeStuttering = true
+    @AppStorage("detectQuotations") private var detectQuotations = false
     @AppStorage("outputStyle") private var outputStyleRaw = "Formal"
 
     private var outputStyle: OutputStyle {
@@ -156,6 +157,17 @@ private struct OutputTab: View {
                     Text("Remove stuttering")
                         .font(.system(size: 12, weight: .medium))
                     Text("Drops duplicate adjacent words (\"the the\" → \"the\")")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .toggleStyle(.checkbox)
+
+            Toggle(isOn: $detectQuotations) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Detect quotations")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Best-effort quoting after speech verbs (e.g. said / was like)")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
