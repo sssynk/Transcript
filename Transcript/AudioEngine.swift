@@ -41,7 +41,7 @@ final class AudioEngine {
             return "Speech recognizer unavailable"
         }
 
-        let newEngine = AVAudioEngine()
+        var newEngine = AVAudioEngine()
 
         let defaultDev = AudioDeviceManager.defaultInputDevice()
         print("[Transcript] System default input: \(defaultDev?.name ?? "none") (\(defaultDev?.uid ?? ""))")
@@ -49,7 +49,10 @@ final class AudioEngine {
         if !state.selectedDeviceUID.isEmpty,
            let deviceID = AudioDeviceManager.deviceID(forUID: state.selectedDeviceUID) {
             print("[Transcript] Using selected device UID: \(state.selectedDeviceUID)")
-            setInputDevice(deviceID, on: newEngine)
+            if !setInputDevice(deviceID, on: newEngine) {
+                print("[Transcript] Device set failed — falling back to system default")
+                newEngine = AVAudioEngine()
+            }
         } else {
             print("[Transcript] Using system default device")
         }
@@ -161,11 +164,12 @@ final class AudioEngine {
         completion(text)
     }
 
-    private func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) {
+    @discardableResult
+    private func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) -> Bool {
         var id = deviceID
         guard let audioUnit = engine.inputNode.audioUnit else {
             print("[Transcript] No audio unit on input node")
-            return
+            return false
         }
         let status = AudioUnitSetProperty(
             audioUnit,
@@ -177,7 +181,9 @@ final class AudioEngine {
         )
         if status != noErr {
             print("[Transcript] setInputDevice failed: \(status)")
+            return false
         }
+        return true
     }
 
     private func cleanup() {
