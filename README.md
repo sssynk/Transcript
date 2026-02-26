@@ -9,7 +9,7 @@ Hold **Right Option (⌥)** to record. Release to transcribe. The text is copied
 A floating pill at the bottom of your screen shows recording, processing, and completion states.
 
 <p align="center">
-  <img src="Images/input.png" width="360">
+  <img src="Images/input1.png" width="360">
 </p>
 
 ## Features
